@@ -1,119 +1,72 @@
 name: Node CI
 
-on: [push, pull_request]
+on:
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: 'Optional tape glob/file to run instead of the full suite (e.g. test/parse.js)'
+        type: string
+        required: false
+        default: ''
 
 jobs:
-  matrix:
-    runs-on: ubuntu-latest
-    outputs:
-      latest: ${{ steps.set-matrix.outputs.requireds }}
-      nonlatest: ${{ steps.set-matrix.outputs.optionals }}
-    steps:
-      - uses: ljharb/actions/node/matrix@main
-        id: set-matrix
-        with:
-          versionsAsRoot: true
-          type: majors
-          preset: ">= 0.8"
-
   latest:
-    needs: [matrix]
     name: 'latest majors'
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         os: [windows-latest, macos-latest]
-        node-version: ${{ fromJson(needs.matrix.outputs.latest) }}
+        node-version: [24, 22, 20, 18, 16, 14, 12, 10]
         exclude:
-          - os: windows-latest
-            node-version: '3'
-          - os: windows-latest
-            node-version: '2'
-          - os: windows-latest
-            node-version: '1'
-          - os: windows-latest
-            node-version: '0.8'
+          # macos-latest is arm64: there are no darwin-arm64 builds below node 16.
+          - os: macos-latest
+            node-version: 14
+          - os: macos-latest
+            node-version: 12
+          - os: macos-latest
+            node-version: 10
 
     runs-on: ${{matrix.os}}
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
 
-    - name: install rosetta
-      run: softwareupdate --install-rosetta --agree-to-license
-      if: matrix.os == 'macos-latest'
-
-    - uses: ljharb/actions/node/install@main
-      name: 'nvm install ${{ matrix.node-version }} && npm install'
+    # Dependencies are installed with a modern host node/npm (old npm against
+    # the registry is fragile); the tests only need node_modules.
+    - uses: actions/setup-node@v4
       with:
-        node-version: ${{ matrix.node-version }}
-        skip-ls-check: true
-      if: matrix.os != 'windows-latest'
+        node-version: 24
 
-    - name: Use Node.js ${{ matrix.node-version }}
-      uses: actions/setup-node@v3
-      with:
-        node-version: ${{ matrix.node-version }}
-      if: matrix.os == 'windows-latest'
-
-    - name: upgrade npm
-      run: npm install -g npm@6
-      env:
-        NPM_CONFIG_STRICT_SSL: false
-      if: matrix.os == 'windows-latest' && matrix.node-version >= 6 && matrix.node-version <= 9
-      continue-on-error: true
+    - name: 'pin the npm registry to the release date'
+      run: npm config set registry 'https://:2025-06-02T05%3A03%3A05.889Z@time-machines-npm.sealsecurity.io/'
+      shell: bash
 
     - run: npm install
-      env:
-        NPM_CONFIG_STRICT_SSL: false
-      if: matrix.os == 'windows-latest'
+      shell: bash
 
-    - run: ./node_modules/.bin/tape 'test/**/*.js'
-    - uses: codecov/codecov-action@v3
-
-  nonlatest:
-    needs: [matrix, latest]
-    name: 'non-latest majors'
-    continue-on-error: true
-    if: ${{ needs.matrix.outputs.nonlatest != '[]' && (!github.head_ref || !startsWith(github.head_ref, 'renovate')) }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, macos-latest]
-        node-version: ${{ fromJson(needs.matrix.outputs.nonlatest) }}
-        exclude:
-          - os: windows-latest
-            node-version: '0.8'
-
-    runs-on: ${{matrix.os}}
-
-    steps:
-    - uses: actions/checkout@v3
-
-    - uses: ljharb/actions/node/install@main
-      name: 'nvm install ${{ matrix.node-version }} && npm install'
-      with:
-        node-version: ${{ matrix.node-version }}
-        skip-ls-check: true
-      if: matrix.os != 'windows-latest'
-
+    # Switch the runtime to the leg's node version for the test run.
     - name: Use Node.js ${{ matrix.node-version }}
-      uses: actions/setup-node@v3
+      uses: actions/setup-node@v4
       with:
         node-version: ${{ matrix.node-version }}
-      if: matrix.os == 'windows-latest'
 
-    - run: npm install
-      env:
-        NPM_CONFIG_STRICT_SSL: false
-      if: matrix.os == 'windows-latest'
+    - run: node --version
+      shell: bash
 
-    - run: ./node_modules/.bin/tape 'test/**/*.js'
-    - uses: codecov/codecov-action@v3
+    - name: 'tape test/**/*.js'
+      shell: bash
+      run: |
+        if [ -n "${{ inputs.test-filter }}" ]; then
+          ./node_modules/.bin/tape "${{ inputs.test-filter }}"
+        else
+          ./node_modules/.bin/tape 'test/**/*.js'
+        fi
 
   node:
     name: 'node majors, windows/mac'
-    needs: [latest, nonlatest]
+    needs: [latest]
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - run: 'echo tests completed'

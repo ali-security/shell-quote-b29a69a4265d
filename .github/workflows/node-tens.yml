@@ -1,14 +1,47 @@
 name: 'Tests: node.js 10 - 20'
 
-on: [pull_request, push]
+on:
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: 'Optional tape glob/file to run instead of the full suite (e.g. test/parse.js)'
+        type: string
+        required: false
+        default: ''
 
 permissions:
   contents: read
 
 jobs:
   tests:
-    uses: ljharb/actions/.github/workflows/node.yml@main
-    with:
-      range: '>= 10 < 20'
-      type: minors
-      command: npm run tests-only
+    name: 'node ${{ matrix.node-version }}'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [19, 18, 17, 16, 15, 14, 13, 12, 11, 10]
+    steps:
+      - uses: actions/checkout@v4
+
+      # Dependencies are installed with a modern host node/npm (old npm against
+      # the registry is fragile); the tests only need node_modules.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: 'pin the npm registry to the release date'
+        run: npm config set registry 'https://:2025-06-02T05%3A03%3A05.889Z@time-machines-npm.sealsecurity.io/'
+      - run: npm install
+
+      # Switch the runtime to the leg's node version for the test run.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+      - run: node --version
+      - name: 'npm run tests-only'
+        run: |
+          if [ -n "${{ inputs.test-filter }}" ]; then
+            npx nyc tape "${{ inputs.test-filter }}"
+          else
+            npm run tests-only
+          fi

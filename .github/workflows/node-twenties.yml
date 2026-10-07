@@ -1,14 +1,63 @@
 name: 'Tests: node.js >= 20'
 
-on: [pull_request, push]
+on:
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: 'Optional tape glob/file to run instead of the full suite (e.g. test/parse.js)'
+        type: string
+        required: false
+        default: ''
 
 permissions:
   contents: read
 
 jobs:
   tests:
-    uses: ljharb/actions/.github/workflows/node.yml@main
-    with:
-      range: '>= 20'
-      type: minors
-      command: npm run tests-only
+    name: 'node ${{ matrix.node-version }}'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [24, 22, 20]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+      - name: 'pin the npm registry to the release date'
+        run: npm config set registry 'https://:2025-06-02T05%3A03%3A05.889Z@time-machines-npm.sealsecurity.io/'
+      - run: npm install
+      - name: 'npm run tests-only'
+        run: |
+          if [ -n "${{ inputs.test-filter }}" ]; then
+            npx nyc tape "${{ inputs.test-filter }}"
+          else
+            npm run tests-only
+          fi
+
+  pack:
+    name: 'npm pack'
+    needs: [tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      # The public tarball was packed with node 24.1.0 / npm 11.3.0.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.1.0'
+      - name: 'pin the npm registry to the release date'
+        run: npm config set registry 'https://:2025-06-02T05%3A03%3A05.889Z@time-machines-npm.sealsecurity.io/'
+      - run: npm install
+      - run: npm i -g npm@11.3.0
+      # `prepack` (npmignore --auto) applies publishConfig.ignore, which is what
+      # the published tarball was built from, so `npm pack` runs with scripts
+      # enabled.
+      - run: npm pack
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shell-quote-tgz
+          path: shell-quote-1.8.3.tgz
+          if-no-files-found: error

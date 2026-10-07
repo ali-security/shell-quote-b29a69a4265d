@@ -1,6 +1,6 @@
 name: Automatic Rebase
 
-on: [pull_request_target]
+on: [workflow_dispatch]
 
 permissions:
   contents: read
@@ -15,8 +15,10 @@ jobs:
 
     runs-on: ubuntu-latest
 
+    timeout-minutes: 5
+
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - uses: ljharb/rebase@master
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,21 +1,253 @@
 name: 'Tests: node.js < 10'
 
-on: [pull_request, push]
+on: [workflow_dispatch]
 
 permissions:
   contents: read
 
 jobs:
   tests:
-    uses: ljharb/actions/.github/workflows/node.yml@main
-    with:
-      range: '< 10'
-      type: minors
-      command: npm run tests-only
+    name: 'node ${{ matrix.node-version }}'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ['0.8', '0.10', '0.12', '1', '2', '3', '4', '5', '6', '7', '8', '9']
+    steps:
+      - uses: actions/checkout@v4
+
+      # The HOST node only installs dependencies: old npm against the registry
+      # is fragile, and the tests only need node_modules.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: 'pin the npm registry to the release date'
+        run: npm config set registry 'https://:2025-06-02T05%3A03%3A05.889Z@time-machines-npm.sealsecurity.io/'
+      - name: 'install dependencies on the host'
+        run: npm install
+
+      - name: 'nvm install ${{ matrix.node-version }} && npm run tests-only'
+        run: |
+          export NVM_DIR="$HOME/.nvm"
+          if [ ! -s "$NVM_DIR/nvm.sh" ]; then
+            mkdir -p "$NVM_DIR"
+            curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+          fi
+          . "$NVM_DIR/nvm.sh"
+
+          nvm install "${{ matrix.node-version }}"
+          nvm use "${{ matrix.node-version }}"
+          node --version
+
+          npm run tests-only
+
+  tests-04:
+    name: 'node 0.4.12'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      # The HOST node only installs dependencies and stages files: pre-1.0 npm
+      # cannot reach any registry, so nothing at all is installed from inside
+      # the node 0.4 container.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: 'pin the npm registry to the release date'
+        run: npm config set registry 'https://:2025-06-02T05%3A03%3A05.889Z@time-machines-npm.sealsecurity.io/'
+
+      - name: 'install dependencies on the host'
+        run: npm install
+
+      # tape@5 is not loadable on pre-1.0 node. Stage tape@4 (which supports
+      # node 0.x) inside the repo so it is visible through the bind mount.
+      - name: 'stage tape@4 for the node 0.4 run'
+        run: |
+          npm install --no-save --prefix /tmp/tape4 tape@4
+          cp -a /tmp/tape4/node_modules ./tape4
+
+      # curl on CentOS 7 cannot reliably TLS-handshake nodejs.org, so the
+      # tarball is fetched on the host and read through the bind mount.
+      - name: 'fetch the node 0.4.12 source on the host'
+        run: curl -fsSLo node-v0.4.12.tar.gz https://nodejs.org/dist/v0.4.12/node-v0.4.12.tar.gz
+
+      # The driver replaces `nyc tape 'test/**/*.js'` for this leg only: nyc does
+      # not run on 0.4, and pre-1.0 node has no `process.exitCode` and flushes
+      # stdout asynchronously at exit, so the tape CLI's exit code and summary
+      # cannot be trusted. This driver buffers every TAP row and, once the
+      # harness finishes, writes the whole report to a file plus an explicit
+      # PASS/FAIL verdict file. Nothing is written to stdout from node 0.4; the
+      # container script cats the report instead. ES5 only (V8 3.1).
+      - name: 'write the node 0.4 tape driver'
+        run: |
+          cat > run04.js <<'RUN04'
+          'use strict';
+
+          var fs = require('fs');
+          var ROOT = '/src';
+          var REPORT = '/tmp/tap04.txt';
+          var VERDICT = '/tmp/verdict04';
+
+          // Absence of a verdict, or a crash mid-run, must read as a failure.
+          fs.writeFileSync(VERDICT, 'FAIL');
+          fs.writeFileSync(REPORT, '(no TAP report: the harness never finished)\n');
+
+          var rows = [];
+          var emitted = false;
+          var finished = false;
+
+          function emit() {
+              if (emitted) { return; }
+              emitted = true;
+
+              var lines = ['TAP version 13'];
+              var count = 0;
+              var pass = 0;
+              var fail = 0;
+              var skip = 0;
+
+              for (var i = 0; i < rows.length; i++) {
+                  var row = rows[i];
+                  if (typeof row === 'string') {
+                      lines.push('# ' + String(row).replace(/[\r\n]+$/, ''));
+                  } else if (row && row.type === 'test') {
+                      lines.push('# ' + row.name + (row.skip ? ' # SKIP' : ''));
+                  } else if (row && row.type === 'assert') {
+                      count += 1;
+                      var name = typeof row.name === 'string' ? row.name : '(unnamed assert)';
+                      if (row.skip) {
+                          skip += 1;
+                          lines.push('ok ' + count + ' ' + name + ' # SKIP');
+                      } else if (row.ok) {
+                          pass += 1;
+                          lines.push('ok ' + count + ' ' + name);
+                      } else {
+                          fail += 1;
+                          lines.push('not ok ' + count + ' ' + name);
+                          lines.push('  ---');
+                          lines.push('    operator: ' + row.operator);
+                          lines.push('    expected: ' + row.expected);
+                          lines.push('    actual:   ' + row.actual);
+                          lines.push('    at:       ' + (row.file || row.at || ''));
+                          lines.push('  ...');
+                      }
+                  }
+              }
+
+              lines.push('');
+              lines.push('1..' + count);
+              lines.push('# tests ' + count);
+              lines.push('# pass  ' + (pass + skip));
+              lines.push('# skip  ' + skip);
+              lines.push('# fail  ' + fail);
+              if (!finished) {
+                  lines.push('# harness did not finish: treating the run as FAILED');
+              }
+              lines.push('');
+
+              fs.writeFileSync(REPORT, lines.join('\n') + '\n');
+              fs.writeFileSync(VERDICT, finished && fail === 0 && count > 0 ? 'PASS' : 'FAIL');
+          }
+
+          // Registered BEFORE the harness exists so it runs ahead of tape's own
+          // exit handler, which calls process.exit() and would cut this short.
+          process.on('exit', emit);
+
+          // node 0.4's Stream.prototype.pipe returns undefined instead of `dest`,
+          // and tape@4 chains `.on()` off the pipe() result. Return `dest` when
+          // the core implementation does not; a no-op on later node versions.
+          var CoreStream = require('stream').Stream;
+          var originalPipe = CoreStream.prototype.pipe;
+          CoreStream.prototype.pipe = function (dest) {
+              var ret = originalPipe.apply(this, arguments);
+              return typeof ret === 'undefined' ? dest : ret;
+          };
+
+          var test = require(ROOT + '/node_modules/tape');
+
+          var stream = test.createStream({ objectMode: true });
+          stream.on('data', function (row) { rows.push(row); });
+          test.onFinish(function () {
+              finished = true;
+              emit();
+          });
+
+          // The same seven files `nyc tape 'test/**/*.js'` expands to.
+          require(ROOT + '/test/comment.js');
+          require(ROOT + '/test/env.js');
+          require(ROOT + '/test/env_fn.js');
+          require(ROOT + '/test/op.js');
+          require(ROOT + '/test/parse.js');
+          require(ROOT + '/test/quote.js');
+          require(ROOT + '/test/set.js');
+          RUN04
+
+      - name: 'write the node 0.4 container script'
+        run: |
+          cat > run04.sh <<'RUN04SH'
+          #!/bin/bash
+          set -ex
+
+          # CentOS 7 is EOL, so its mirrors are gone: repoint yum at the vault
+          # BEFORE installing anything.
+          sed -i 's|^mirrorlist|#mirrorlist|g' /etc/yum.repos.d/CentOS-*.repo
+          sed -i 's|^#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' /etc/yum.repos.d/CentOS-*.repo
+          yum install -y gcc gcc-c++ make python2 tar zlib-devel
+
+          # node 0.4's waf `configure` shells out to `python`, which must be python2.
+          ln -sf /usr/bin/python2 /usr/bin/python
+
+          # No pre-built binary exists for node 0.4: compile 0.4.12 from source.
+          mkdir -p /tmp/node04src
+          tar xzf /src/node-v0.4.12.tar.gz -C /tmp/node04src
+          cd /tmp/node04src/node-v0.4.12
+          ./configure --prefix=/opt/node04 --without-ssl --without-snapshot
+          make -j"$(nproc)"
+          make install
+          /opt/node04/bin/node --version
+
+          cd /src
+
+          # Swap the host-staged tape@4 in place of tape@5, and nest tape@4's own
+          # dependency tree (minus tape itself) under it, so the test files and
+          # the driver resolve to ONE tape instance.
+          rm -rf node_modules/tape
+          mkdir -p node_modules/tape
+          cp -a tape4/tape/. node_modules/tape/
+          mkdir -p node_modules/tape/node_modules
+          for dep in tape4/*; do
+              depname=$(basename "$dep")
+              if [ "$depname" != "tape" ] && [ ! -e "node_modules/tape/node_modules/$depname" ]; then
+                  cp -a "$dep" node_modules/tape/node_modules/
+              fi
+          done
+
+          cp /src/run04.js /tmp/run04.js
+
+          echo '=== Test suite: node 0.4.12 ==='
+          set +e
+          /opt/node04/bin/node /tmp/run04.js
+          rc=$?
+          set -e
+          cat /tmp/tap04.txt
+          cp /tmp/verdict04 /src/verdict04
+          echo "node 0.4.12 exit code: $rc, verdict: $(cat /tmp/verdict04)"
+          test "$rc" -eq 0
+          test "$(cat /tmp/verdict04)" = PASS
+          RUN04SH
+
+      - name: 'build node 0.4.12 and run the test suite'
+        run: |
+          docker run --rm -v "$PWD":/src -w /src centos:7 /bin/bash /src/run04.sh
+          test "$(cat verdict04)" = PASS
 
   node:
     name: 'node < 10'
-    needs: [tests]
+    needs: [tests, tests-04]
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - run: 'echo tests completed'
