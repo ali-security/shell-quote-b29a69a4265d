@@ -38,7 +38,7 @@ function matchAll(s, r) {
 	var matchObj;
 
 	while ((matchObj = r.exec(s))) {
-		matches.push(matchObj);
+		matches[matches.length] = matchObj;
 		if (r.lastIndex === matchObj.index) {
 			r.lastIndex += 1;
 		}
@@ -198,8 +198,13 @@ function parseInternal(string, env, opts) {
 
 		return out;
 	}).reduce(function (prev, arg) { // finalize parsed arguments
-		// TODO: replace this whole reduce with a concat
-		return typeof arg === 'undefined' ? prev : prev.concat(arg);
+		if (typeof arg === 'undefined') {
+			return prev;
+		}
+		[].concat(arg).forEach(function (entry) {
+			prev[prev.length] = entry;
+		});
+		return prev;
 	}, []);
 }
 
@@ -210,17 +215,19 @@ module.exports = function parse(s, env, opts) {
 	}
 	return mapped.reduce(function (acc, s) {
 		if (typeof s === 'object') {
-			return acc.concat(s);
+			acc[acc.length] = s;
+			return acc;
 		}
 		var xs = s.split(RegExp('(' + TOKEN + '.*?' + TOKEN + ')', 'g'));
 		if (xs.length === 1) {
-			return acc.concat(xs[0]);
+			acc[acc.length] = xs[0];
+			return acc;
 		}
-		return acc.concat(xs.filter(Boolean).map(function (x) {
-			if (startsWithToken.test(x)) {
-				return JSON.parse(x.split(TOKEN)[1]);
-			}
-			return x;
-		}));
+		xs.filter(Boolean).forEach(function (x) {
+			acc[acc.length] = startsWithToken.test(x)
+				? JSON.parse(x.split(TOKEN)[1])
+				: x;
+		});
+		return acc;
 	}, []);
 };
